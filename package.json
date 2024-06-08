@@ -1,0 +1,16 @@
+{
+  "name": "export-fitbit",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "export-fitbit.js",
+  "scripts": {
+    "start": "node export-fitbit.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Tobiáš Potoček",
+  "license": "ISC",
+  "dependencies": {
+    "@apify/log": "^2.5.1"
+  }
+}
