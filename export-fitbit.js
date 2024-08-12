@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
-import { FITBIT_BEARER_TOKEN, ACTIVITIES_DOWNLOAD_DIR, TAKEOUT_EXERCISES_DIR } from "./config.js";
+import { FITBIT_BEARER_TOKEN, ACTIVITIES_DOWNLOAD_DIR, AFTER_DATE } from './config.js';
 
 // Create download directory if it doesn't exist.
 if (!fs.existsSync(ACTIVITIES_DOWNLOAD_DIR)) {
@@ -14,18 +14,19 @@ if (!fs.existsSync(ACTIVITIES_DOWNLOAD_DIR)) {
     log.info("Download directory already exists", { ACTIVITIES_DOWNLOAD_DIR });
 }
 
-// Extract activities from the Takeout files.
-log.info("Reading activities from the Takeout files", { TAKEOUT_EXERCISES_DIR });
-const activities = getActivities();
-log.info("Read activities from the Takeout files", { count: activities.length });
+// Fetch activities from Fitbit using their API
+log.info("Fetching activities from Fitbit");
+const activities = await getActivities();
+log.info("Fetched activities from Fitbit", { count: activities.length });
 
 // Filter activities that have GPS data.
 const gpsActivities = activities
-    .filter(activity => activity.hasGps)
-    .map(activity => ({
-       id: activity.logId,
-       name: activity.name,
-       startDateTime: parseCustomDateString(activity.startTime).toISOString(),
+    .filter(activity => activity.tcxLink && activity.source?.trackerFeatures?.includes("GPS"))
+    .map(({ logId, name, startTime, tcxLink }) => ({
+        id: logId,
+        name: name,
+        startDateTime: new Date(startTime).toISOString(),
+        tcxLink: tcxLink,
     }));
 log.info("Found activities with GPS data. Starting downloads", { count: gpsActivities.length });
 
@@ -38,34 +39,32 @@ for (const activity of gpsActivities) {
 
 log.info("All workouts downloaded", { count: gpsActivities.length });
 
-function getActivities() {
-    try {
-        const files = fs.readdirSync(TAKEOUT_EXERCISES_DIR);
-        const exerciseFiles = files.filter(file => file.startsWith("exercise") && file.endsWith(".json"));
+async function getActivities() {
+    const perPage = 100; // Max allowed by Fitbit API
 
-        let exercises = [];
+    let allActivities = [];
+    let nextUrl = `https://api.fitbit.com/1/user/-/activities/list.json?afterDate=${AFTER_DATE}&sort=asc&offset=0&limit=${perPage}`;
 
-        for (const file of exerciseFiles) {
-            const filePath = path.join(TAKEOUT_EXERCISES_DIR, file);
-            const fileContent = fs.readFileSync(filePath, 'utf8');
-            const jsonArray = JSON.parse(fileContent);
+    while (nextUrl) {
+        const response = await fetch(nextUrl, getFitbitRequestOptions());
 
-            // Ensure the content is an array before combining
-            if (Array.isArray(jsonArray)) {
-                exercises = exercises.concat(jsonArray);
-            } else {
-                log.warning("File does not contain an array", { file });
-            }
+        if (!response.ok) {
+            await logNotOk(response);
+            throw new Error("Fetching failed");
         }
 
-        return exercises;
-    } catch (error) {
-        log.error('Reading activities from the Takeout files failed ', { TAKEOUT_EXERCISES_DIR });
-        throw error;
+        const { activities, pagination: { next } } = await response.json();
+
+        allActivities = allActivities.concat(activities);
+        nextUrl = next;
+
+        log.debug("Fetched a page of activities", { count: activities.length });
     }
+
+    return allActivities;
 }
 
-async function downloadActivityTcx({ id, startDateTime }) {
+async function downloadActivityTcx({ id, startDateTime, tcxLink }) {
     const targetFilename = `activity-${startDateTime}-${id}.tcx`;
     const targetPath = path.resolve(`./${ACTIVITIES_DOWNLOAD_DIR}/`, targetFilename);
 
@@ -78,9 +77,7 @@ async function downloadActivityTcx({ id, startDateTime }) {
         }
     }
 
-    const response = await fetch(
-        `https://web-api.fitbit.com/1.1/user/-/activities/${id}.tcx`,
-        getFitbitRequestOptions());
+    const response = await fetch(tcxLink, getFitbitRequestOptions());
 
     if (!response.ok) {
         await logNotOk(response);
@@ -119,20 +116,4 @@ async function logNotOk(response) {
         statusText: response.statusText,
     });
     log.error(await response.text());
-}
-
-function parseCustomDateString(dateString) {
-    // Takeout seems to be representing date as "MM/DD/YY HH:MM:SS"
-    const regex = /^(\d{2})\/(\d{2})\/(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
-    const match = dateString.match(regex);
-
-    if (!match) {
-        throw new Error('Invalid date format');
-    }
-
-    const [_, month, day, year, hours, minutes, seconds] = match;
-
-    // Convert two-digit year to four-digit year
-    const fullYear = +year < 50 ? 2000 + +year : 1900 + +year;
-    return new Date(fullYear, month - 1, day, hours, minutes, seconds);
 }
